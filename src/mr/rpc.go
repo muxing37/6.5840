@@ -21,3 +21,30 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+const (
+	MapTask int = iota
+	ReduceTask
+	WaitTask
+	ExitTask
+)
+
+type Task struct {
+	Type    int
+	ID      int
+	File    string
+	NReduce int
+	NMap    int
+}
+
+type GetTaskArgs struct{}
+
+type GetTaskReply struct {
+	Task Task
+}
+
+type ReportDoneArgs struct {
+	Type int
+	ID   int
+}
+
+type ReportDoneReply struct{}
