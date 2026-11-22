@@ -124,7 +124,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 			return nil
 		}
 	}
-	reply.Task = Task{Type: WaitTask}
+	reply.Task = Task{Type: ExitTask}
 	return nil
 }
 
