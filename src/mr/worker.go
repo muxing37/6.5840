@@ -1,11 +1,16 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-import "os"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
+)
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -23,18 +28,123 @@ func ihash(key string) int {
 
 var coordSockName string // socket for coordinator
 
-
 // main/mrworker.go calls this function.
 func Worker(sockname string, mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	coordSockName = sockname
+	for {
+		args := GetTaskArgs{}
+		reply := GetTaskReply{}
+		if !call("Coordinator.GetTask", &args, &reply) {
+			return
+		}
+		task := reply.Task
+		switch task.Type {
+		case MapTask:
+			doMap(task, mapf)
+			reportDone(MapTask, task.ID)
+		case ReduceTask:
+			doReduce(task, reducef)
+			reportDone(ReduceTask, task.ID)
+		case WaitTask:
+			time.Sleep(50 * time.Millisecond)
+		case ExitTask:
+			return
+		}
+	}
+}
 
-	// Your worker implementation here.
+func reportDone(t int, id int) {
+	args := ReportDoneArgs{Type: t, ID: id}
+	reply := ReportDoneReply{}
+	call("Coordinator.ReportDone", &args, &reply)
+}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+func doMap(task Task, mapf func(string, string) []KeyValue) {
+	content, err := os.ReadFile(task.File)
+	if err != nil {
+		log.Fatalf("map %d: read %s: %v", task.ID, task.File, err)
+	}
+	kvs := mapf(task.File, string(content))
 
+	files := make([]*os.File, task.NReduce)
+	encs := make([]*json.Encoder, task.NReduce)
+	for r := 0; r < task.NReduce; r++ {
+		f, err := os.CreateTemp(".", "mr-map-*tmp")
+		if err != nil {
+			log.Fatalf("map %d: createtemp: %v", task.ID, err)
+		}
+		files[r] = f
+		encs[r] = json.NewEncoder(f)
+	}
+
+	for _, kv := range kvs {
+		r := ihash(kv.Key) % task.NReduce
+		if err := encs[r].Encode(kv); err != nil {
+			log.Fatalf("map %d: encode: %v", task.ID, err)
+		}
+	}
+
+	for r := 0; r < task.NReduce; r++ {
+		tmpName := files[r].Name()
+		if err := files[r].Close(); err != nil {
+			log.Fatalf("map %d: close: %v", task.ID, err)
+		}
+		final := fmt.Sprintf("mr-%d-%d", task.ID, r)
+		if err := os.Rename(tmpName, final); err != nil {
+			log.Fatalf("map %d: rename %s: %v", task.ID, final, err)
+		}
+	}
+}
+
+func doReduce(task Task, reducef func(string, []string) string) {
+	groups := make(map[string][]string)
+
+	for m := 0; m < task.NMap; m++ {
+		name := fmt.Sprintf("mr-%d-%d", m, task.ID)
+		f, err := os.Open(name)
+		if err != nil {
+			log.Fatalf("reduce %d: open %s: %v", task.ID, name, err)
+		}
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			err := dec.Decode(&kv)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Fatalf("reduce %d: decode %s: %v", task.ID, name, err)
+			}
+			groups[kv.Key] = append(groups[kv.Key], kv.Value)
+		}
+		f.Close()
+	}
+
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out, err := os.CreateTemp(".", "mr-out-*tmp")
+	if err != nil {
+		log.Fatalf("reduce %d: createtemp: %v", task.ID, err)
+	}
+	for _, k := range keys {
+		v := reducef(k, groups[k])
+		if _, err := fmt.Fprintf(out, "%v %v\n", k, v); err != nil {
+			log.Fatalf("reduce %d: write: %v", task.ID, err)
+		}
+	}
+	tmpName := out.Name()
+	if err := out.Close(); err != nil {
+		log.Fatalf("reduce %d: close: %v", task.ID, err)
+	}
+	if err := os.Rename(tmpName, fmt.Sprintf("mr-out-%d", task.ID)); err != nil {
+		log.Fatalf("reduce %d: rename: %v", task.ID, err)
+	}
 }
 
 // example function to show how to make an RPC call to the coordinator.
